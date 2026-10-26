@@ -1,71 +1,53 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Configuration;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using Ncfe.CodeTest.DataStores;
+using Ncfe.CodeTest.Failover;
 
 namespace Ncfe.CodeTest
 {
     public class LearnerService
     {
-        public Learner GetLearner(int learnerId, bool isLearnerArchived)
+        private readonly IArchivedLearnerStore _archivedLearnerStore;
+        private readonly ILearnerDataStore _learnerDataStore;
+
+        /// <summary>
+        /// Wires up the default production dependencies so existing callers that use
+        /// <c>new LearnerService()</c> keep working. Prefer the injecting constructor
+        /// (registered in a DI container) for new code.
+        /// </summary>
+        public LearnerService()
+            : this(
+                new ArchivedLearnerStore(new ArchivedDataService()),
+                new FailoverAwareLearnerDataStore(
+                    new MainLearnerDataStore(new LearnerDataAccess()),
+                    new FailoverLearnerDataStore(),
+                    new FailoverModeEvaluator(new FailoverRepository(), new AppSettingsFailoverSettings(), new SystemClock())))
         {
-            Learner archivedLearner = null;
-
-            if (isLearnerArchived)
-            {
-                var archivedDataService = new ArchivedDataService();
-                archivedLearner = archivedDataService.GetArchivedLearner(learnerId);
-
-                return archivedLearner;
-            }
-            else
-            {
-
-                var failoverRespository = new FailoverRepository();
-                var failoverEntries = failoverRespository.GetFailOverEntries();
-
-
-                var failedRequests = 0;
-
-                foreach (var failoverEntry in failoverEntries)
-                {
-                    if (failoverEntry.DateTime > DateTime.Now.AddMinutes(-10))
-                    {
-                        failedRequests++;
-                    }
-                }
-
-                LearnerResponse learnerResponse = null;
-                Learner learner = null;
-
-                if (failedRequests > 100 && (ConfigurationManager.AppSettings["IsFailoverModeEnabled"] == "true" || ConfigurationManager.AppSettings["IsFailoverModeEnabled"] == "True"))
-                {
-                    learnerResponse = FailoverLearnerDataAccess.GetLearnerById(learnerId);
-                }
-                else
-                {
-                    var dataAccess = new LearnerDataAccess();
-                    learnerResponse = dataAccess.LoadLearner(learnerId);
-
-
-                }
-
-                if (learnerResponse.IsArchived)
-                {
-                    var archivedDataService = new ArchivedDataService();
-                    learner = archivedDataService.GetArchivedLearner(learnerId);
-                }
-                else
-                {
-                    learner = learnerResponse.Learner;
-                }
-
-
-                return learner;
-            }
         }
 
+        public LearnerService(IArchivedLearnerStore archivedLearnerStore, ILearnerDataStore learnerDataStore)
+        {
+            _archivedLearnerStore = archivedLearnerStore ?? throw new ArgumentNullException(nameof(archivedLearnerStore));
+            _learnerDataStore = learnerDataStore ?? throw new ArgumentNullException(nameof(learnerDataStore));
+        }
+
+        public Learner GetLearner(int learnerId, bool isLearnerArchived)
+        {
+            if (isLearnerArchived)
+            {
+                return _archivedLearnerStore.GetArchivedLearner(learnerId);
+            }
+
+            var learnerResponse = _learnerDataStore.GetLearner(learnerId);
+
+            if (learnerResponse == null)
+            {
+                return null;
+            }
+
+            // The live/failover store may report that the learner has since been archived
+            return learnerResponse.IsArchived
+                ? _archivedLearnerStore.GetArchivedLearner(learnerId)
+                : learnerResponse.Learner;
+        }
     }
 }
